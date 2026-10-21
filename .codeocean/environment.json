@@ -1,0 +1,10 @@
+{
+	"version": 1,
+	"base_image": "codeocean/cpu-qmg-oncology-co-red-repo-base:v1.0.0",
+	"post_install": true,
+	"options": {
+		"registry_host_arg": true,
+		"git_ask_pass": true,
+		"mount_secrets": true
+	}
+}

@@ -1,0 +1,5 @@
+.Rproj.user
+.vscode
+.codeocean/secrets.json
+.Rhistory
+.RData

@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Code Ocean build-time package installation for the CRISPRScope capsule.
+#
+# Runs ONCE while the environment image is built (baked into the image, so a
+# Reproducible Run needs no network). It installs every R package the pipeline
+# (01-04) needs that is not already in the base image.
+#
+# Base image: codeocean/cpu-qmg-oncology-co-red-repo-base:v1.0.0
+#   -> ships R 4.6.x  +  Bioconductor 3.23  +  Seurat 5.5.x
+#
+# Design:
+#   * Idempotent   -- each package is installed only if it can't already load,
+#                     so packages baked into the base image are left untouched.
+#   * Reproducible -- Bioconductor version is taken from BiocManager (so it
+#                     always matches the base image's R), GitHub packages are
+#                     pinned to a commit, SAVER is source-patched.
+#   * Offline-safe at runtime -- everything is resolved here, at build time.
+#
+# NOTE: we keep the Seurat that ships in the base image (v5). The pipeline
+# scripts use only functions that Seurat 5.5.x still exports (RunMixscape,
+# CalcPerturbSig, MixscapeHeatmap, PlotPerturbScore, GetAssayData, ...), so we
+# do NOT downgrade to v4. Downgrading old 2023 Seurat binaries onto R 4.6 is
+# fragile and unnecessary.
+# =============================================================================
+set -euo pipefail
+
+# --- original pin (kept) -----------------------------------------------------
+Rscript -e 'if (!requireNamespace("lubridate", quietly=TRUE) ||
+                 packageVersion("lubridate") != "1.9.3")
+              remotes::install_version("lubridate", "1.9.3", upgrade="never")'
+
+# --- CRISPRScope pipeline packages -------------------------------------------
+# Quote the heredoc terminator ('RSCRIPT') so bash does not expand $ or `...`
+# inside the R code. Do NOT use Rscript --vanilla: we want the base image's
+# site profile (which configures the package mirrors) to load.
+Rscript - <<'RSCRIPT'
+options(warn = 1)
+message("== CRISPRScope postInstall: ensuring pipeline packages ==")
+
+need <- function(p) !requireNamespace(p, quietly = TRUE)
+have <- function(p) if (need(p)) "MISSING" else as.character(packageVersion(p))
+skip <- function(p) message(sprintf("[skip] %-16s %s", p, have(p)))
+
+## ---- bootstrap installers --------------------------------------------------
+if (need("remotes"))     install.packages("remotes")
+if (need("BiocManager")) install.packages("BiocManager")
+
+# Take the Bioconductor release from BiocManager so it always matches the R
+# version in the base image (R 4.6 -> Bioc 3.23). Do not hard-code it: a
+# hard-coded version breaks the build the next time the base image's R moves.
+BIOC <- as.character(BiocManager::version())
+message(sprintf("Bioconductor version: %s  (R %s)", BIOC, getRversion()))
+
+ensure_cran <- function(pkg, version = NULL) {
+  if (!need(pkg)) return(skip(pkg))
+  message(sprintf("[cran] %s %s", pkg, if (is.null(version)) "(latest)" else version))
+  if (is.null(version)) install.packages(pkg)
+  else remotes::install_version(pkg, version, upgrade = "never")
+}
+
+ensure_bioc <- function(pkg) {
+  if (!need(pkg)) return(skip(pkg))
+  message(sprintf("[bioc] %s (Bioc %s)", pkg, BIOC))
+  BiocManager::install(pkg, version = BIOC, update = FALSE, ask = FALSE)
+}
+
+ensure_github <- function(repo, ref) {
+  pkg <- sub(".*/", "", repo)
+  if (!need(pkg)) return(skip(pkg))
+  message(sprintf("[gh]   %s@%s", repo, substr(ref, 1, 10)))
+  remotes::install_github(paste0(repo, "@", ref), upgrade = "never")
+}
+
+## ---- SAVER (patched) -------------------------------------------------------
+# CRAN SAVER 1.1.2 has  `if (grepl("matrix", class(x)))`  in clean.data(); on
+# R >= 4.2 class(a_matrix) is c("matrix","array") (length 2), so the condition
+# is length > 1 -> a hard error. MUSIC's Data_imputation() -> saver() hits this.
+# Build a source-patched SAVER (wrap the grepl in any()) so 03_music.R runs.
+saver_buggy <- function() {
+  if (need("SAVER")) return(TRUE)
+  f <- tryCatch(getFromNamespace("clean.data", "SAVER"), error = function(e) NULL)
+  if (is.null(f)) return(TRUE)
+  src <- paste(deparse(f), collapse = " ")
+  grepl('grepl\\("matrix", class\\(x\\)', src) && !grepl("any\\(grepl", src)
+}
+ensure_saver_patched <- function() {
+  if (!saver_buggy()) return(skip("SAVER"))
+  message("[patch] building SAVER with R>=4.2 clean.data fix")
+  td <- tempfile("saver_"); dir.create(td)
+  download.packages("SAVER", destdir = td, type = "source")   # current CRAN == 1.1.2
+  tb <- list.files(td, pattern = "^SAVER_.*\\.tar\\.gz$", full.names = TRUE)[1]
+  untar(tb, exdir = td)
+  ur  <- file.path(td, "SAVER", "R", "utils.R")
+  txt <- readLines(ur)
+  txt <- gsub('grepl("matrix", class(x), ignore.case = TRUE)',
+              'any(grepl("matrix", class(x), ignore.case = TRUE))',
+              txt, fixed = TRUE)
+  writeLines(txt, ur)
+  install.packages(file.path(td, "SAVER"), repos = NULL, type = "source")
+}
+
+## ---- install (dependencies before the packages that need them) -------------
+# Common CRAN packages the scripts use (no-ops if the base image already has them).
+for (p in c("dplyr", "Matrix", "ggplot2", "patchwork", "reshape2")) ensure_cran(p)
+
+# Seurat is provided by the base image (v5). Keep it; just report the version.
+skip("Seurat")
+skip("SeuratObject")
+
+# presto: fast Wilcoxon DE. Seurat auto-uses it for FindMarkers, so 02_mixscape
+# (which runs DE up to iter.num times per target gene) goes from ~an hour to a
+# few minutes. Same statistic, just a C++ implementation. Pinned to a commit.
+ensure_github("immunogenomics/presto", "3c97180d90d330524b5b8353a342ab2f4b990d21")
+
+# h5 reader for 01_build_seurat.R
+ensure_cran("hdf5r")
+
+# MUSIC (03) dependencies
+ensure_cran("topicmodels")
+ensure_cran("hash")
+ensure_bioc("Biostrings")
+ensure_bioc("clusterProfiler")
+ensure_saver_patched()
+
+# The two GitHub perturbation-method packages (pinned to commits validated locally).
+ensure_github("bm2-lab/MUSIC",         "32f8e1777d0f35c534a820cd85a278f08e72fa05")
+ensure_github("katsevich-lab/sceptre", "21f9ea098b69c444a884a49bc254de711968e3b5")
+
+## ---- verify: fail the build if anything is still missing -------------------
+required <- c("Seurat","SeuratObject","presto","dplyr","Matrix","ggplot2","patchwork",
+              "reshape2","hdf5r","topicmodels","hash","Biostrings",
+              "clusterProfiler","SAVER","MUSIC","sceptre")
+cat("\n== package status ==\n")
+for (p in required) cat(sprintf("  %-16s %s\n", p, have(p)))
+missing <- required[vapply(required, need, logical(1))]
+if (length(missing))
+  stop("postInstall failed -- still missing: ", paste(missing, collapse = ", "))
+
+message("== CRISPRScope postInstall complete ==")
+RSCRIPT

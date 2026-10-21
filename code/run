@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Code Ocean capsule entry point.
+# Builds one integrated Seurat object, then runs MIXSCAPE, MUSIC and SCEPTRE
+# from that same object. All outputs go to $RESULTS_DIR (default /results).
+# =============================================================================
+set -euo pipefail
+
+# Run from the directory containing this script so config.R / *.R resolve.
+cd "$(dirname "$0")"
+
+echo "==> 01 build integrated Seurat object"
+Rscript 01_build_seurat.R
+
+echo "==> 02 MIXSCAPE"
+Rscript 02_mixscape.R
+
+echo "==> 03 MUSIC"
+Rscript 03_music.R
+
+echo "==> 04 SCEPTRE"
+Rscript 04_sceptre.R
+
+echo "==> done. See results/"

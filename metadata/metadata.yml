@@ -1,0 +1,18 @@
+metadata_version: 1
+name: CRISPRScope – single-cell CRISPR perturbation analysis
+description: >
+  Reproducible pipeline that builds one integrated Seurat object from a
+  Cell Ranger CRISPR h5 (RNA + CRISPR Guide Capture) and analyses perturbation
+  effects with three complementary methods — MIXSCAPE, MUSIC and SCEPTRE — all
+  driven from the same object.
+tags:
+  - single-cell
+  - CRISPR
+  - perturb-seq
+  - Seurat
+  - mixscape
+  - MUSIC
+  - sceptre
+authors:
+  - name: Alice Wan
+language: R
